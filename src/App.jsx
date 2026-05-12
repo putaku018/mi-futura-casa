@@ -1,39 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
+import { createClient } from "@supabase/supabase-js";
 import "./App.css";
 
-const STORAGE_KEY = "mi-futura-casa-data";
+const SUPABASE_URL = "https://bdlsxfhncsdytolwupfk.supabase.co";
+const SUPABASE_KEY = "sb_publishable_0l4GBTf3JRDt3Bva1zeBRg_-_Xax1HH";
 
-const initialData = {
-  departments: [
-    {
-      id: "depto-1",
-      title: "Depto favorito 1",
-      url: "https://www.zonaprop.com.ar/",
-      note: "Agregá acá tus opciones reales de compra.",
-    },
-  ],
-  products: [
-    {
-      id: "producto-1",
-      name: "Heladera",
-      description: "Modelo eficiente y tamaño acorde al depto.",
-      price: 850000,
-      url: "https://www.mercadolibre.com.ar/",
-    },
-    {
-      id: "producto-2",
-      name: "Cama",
-      description: "Base + colchón cómodo para primera mudanza.",
-      price: 500000,
-      url: "https://www.mercadolibre.com.ar/",
-    },
-  ],
-  savings: 1200000,
-};
-
-function createId() {
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 function safeNumber(value) {
   const number = Number(value);
@@ -58,14 +30,12 @@ function shortUrl(url) {
 }
 
 export default function App() {
-  const [data, setData] = useState(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      return saved ? JSON.parse(saved) : initialData;
-    } catch {
-      return initialData;
-    }
-  });
+  const [departments, setDepartments] = useState([]);
+  const [products, setProducts] = useState([]);
+  const [savings, setSavings] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [savingMoney, setSavingMoney] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
 
   const [deptForm, setDeptForm] = useState({
     title: "",
@@ -80,89 +50,177 @@ export default function App() {
     url: "",
   });
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-    } catch {
-      console.log("No se pudo guardar en localStorage");
-    }
-  }, [data]);
-
   const totalProducts = useMemo(() => {
-    return data.products.reduce((total, product) => {
-      return total + safeNumber(product.price);
-    }, 0);
-  }, [data.products]);
+    return products.reduce((total, product) => total + safeNumber(product.price), 0);
+  }, [products]);
 
-  const savings = safeNumber(data.savings);
-  const missing = Math.max(totalProducts - savings, 0);
-  const progress = totalProducts > 0 ? Math.min((savings / totalProducts) * 100, 100) : 100;
+  const missing = Math.max(totalProducts - safeNumber(savings), 0);
+  const progress = totalProducts > 0 ? Math.min((safeNumber(savings) / totalProducts) * 100, 100) : 100;
 
-  const addDepartment = () => {
+  async function loadData() {
+    setLoading(true);
+    setErrorMessage("");
+
+    const [departmentsResponse, productsResponse, settingsResponse] = await Promise.all([
+      supabase.from("departments").select("*").order("created_at", { ascending: false }),
+      supabase.from("products").select("*").order("created_at", { ascending: false }),
+      supabase.from("settings").select("*").eq("id", "main").single(),
+    ]);
+
+    if (departmentsResponse.error || productsResponse.error || settingsResponse.error) {
+      console.log({
+        departmentsError: departmentsResponse.error,
+        productsError: productsResponse.error,
+        settingsError: settingsResponse.error,
+      });
+
+      setErrorMessage("No se pudieron cargar los datos de Supabase.");
+      setLoading(false);
+      return;
+    }
+
+    setDepartments(departmentsResponse.data || []);
+    setProducts(productsResponse.data || []);
+    setSavings(settingsResponse.data?.savings || 0);
+    setLoading(false);
+  }
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  async function addDepartment() {
     if (!deptForm.url.trim()) return;
 
+    setErrorMessage("");
+
     const newDepartment = {
-      id: createId(),
       title: deptForm.title.trim() || "Nueva propuesta",
       url: deptForm.url.trim(),
       note: deptForm.note.trim(),
     };
 
-    setData((prev) => ({
-      ...prev,
-      departments: [...prev.departments, newDepartment],
-    }));
+    const { data, error } = await supabase
+      .from("departments")
+      .insert(newDepartment)
+      .select()
+      .single();
 
-    setDeptForm({
-      title: "",
-      url: "",
-      note: "",
-    });
-  };
+    if (error) {
+      console.log(error);
+      setErrorMessage("No se pudo agregar la propuesta.");
+      return;
+    }
 
-  const removeDepartment = (id) => {
-    setData((prev) => ({
-      ...prev,
-      departments: prev.departments.filter((department) => department.id !== id),
-    }));
-  };
+    setDepartments((prev) => [data, ...prev]);
+    setDeptForm({ title: "", url: "", note: "" });
+  }
 
-  const addProduct = () => {
+  async function removeDepartment(id) {
+    const { error } = await supabase.from("departments").delete().eq("id", id);
+
+    if (error) {
+      console.log(error);
+      setErrorMessage("No se pudo eliminar la propuesta.");
+      return;
+    }
+
+    setDepartments((prev) => prev.filter((department) => department.id !== id));
+  }
+
+  async function addProduct() {
     if (!productForm.name.trim()) return;
 
+    setErrorMessage("");
+
     const newProduct = {
-      id: createId(),
       name: productForm.name.trim(),
       description: productForm.description.trim(),
       price: safeNumber(productForm.price),
       url: productForm.url.trim(),
     };
 
-    setData((prev) => ({
-      ...prev,
-      products: [...prev.products, newProduct],
-    }));
+    const { data, error } = await supabase
+      .from("products")
+      .insert(newProduct)
+      .select()
+      .single();
 
-    setProductForm({
-      name: "",
-      description: "",
-      price: "",
-      url: "",
-    });
-  };
+    if (error) {
+      console.log(error);
+      setErrorMessage("No se pudo agregar el producto.");
+      return;
+    }
 
-  const removeProduct = (id) => {
-    setData((prev) => ({
-      ...prev,
-      products: prev.products.filter((product) => product.id !== id),
-    }));
-  };
+    setProducts((prev) => [data, ...prev]);
+    setProductForm({ name: "", description: "", price: "", url: "" });
+  }
 
-  const resetData = () => {
+  async function removeProduct(id) {
+    const { error } = await supabase.from("products").delete().eq("id", id);
+
+    if (error) {
+      console.log(error);
+      setErrorMessage("No se pudo eliminar el producto.");
+      return;
+    }
+
+    setProducts((prev) => prev.filter((product) => product.id !== id));
+  }
+
+  async function updateSavings(value) {
+    const cleanValue = safeNumber(value);
+    setSavings(cleanValue);
+    setSavingMoney(true);
+
+    const { error } = await supabase
+      .from("settings")
+      .update({ savings: cleanValue })
+      .eq("id", "main");
+
+    if (error) {
+      console.log(error);
+      setErrorMessage("No se pudo actualizar el ahorro.");
+    }
+
+    setSavingMoney(false);
+  }
+
+  async function resetData() {
     const confirmReset = window.confirm("¿Seguro que querés borrar todos los datos?");
     if (!confirmReset) return;
-    setData(initialData);
-  };
+
+    const [deleteDepartments, deleteProducts, updateSettings] = await Promise.all([
+      supabase.from("departments").delete().neq("id", "00000000-0000-0000-0000-000000000000"),
+      supabase.from("products").delete().neq("id", "00000000-0000-0000-0000-000000000000"),
+      supabase.from("settings").update({ savings: 0 }).eq("id", "main"),
+    ]);
+
+    if (deleteDepartments.error || deleteProducts.error || updateSettings.error) {
+      setErrorMessage("No se pudieron reiniciar los datos.");
+      return;
+    }
+
+    setDepartments([]);
+    setProducts([]);
+    setSavings(0);
+  }
+
+  if (loading) {
+    return (
+      <main className="app">
+        <section className="container">
+          <header className="hero">
+            <div className="hero-content">
+              <span className="tag">✨ Cargando</span>
+              <h1>Mi futura casa</h1>
+              <p>Estamos trayendo tus datos desde la base online.</p>
+            </div>
+          </header>
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="app">
@@ -193,6 +251,8 @@ export default function App() {
             </div>
           </div>
         </header>
+
+        {errorMessage && <div className="form-card">{errorMessage}</div>}
 
         <section className="section">
           <div className="section-title">
@@ -229,7 +289,7 @@ export default function App() {
           </div>
 
           <div className="carousel">
-            {data.departments.map((department) => (
+            {departments.map((department) => (
               <article className="department-card" key={department.id}>
                 <div className="card-top">
                   <div>
@@ -326,14 +386,14 @@ export default function App() {
                 </thead>
 
                 <tbody>
-                  {data.products.length === 0 ? (
+                  {products.length === 0 ? (
                     <tr>
                       <td colSpan="5" className="empty-table">
                         Todavía no agregaste productos.
                       </td>
                     </tr>
                   ) : (
-                    data.products.map((product) => (
+                    products.map((product) => (
                       <tr key={product.id}>
                         <td>
                           <strong>{product.name}</strong>
@@ -404,13 +464,8 @@ export default function App() {
                 <input
                   type="number"
                   className="savings-input"
-                  value={data.savings}
-                  onChange={(e) =>
-                    setData((prev) => ({
-                      ...prev,
-                      savings: safeNumber(e.target.value),
-                    }))
-                  }
+                  value={savings}
+                  onChange={(e) => updateSavings(e.target.value)}
                 />
 
                 <div className="stats">
@@ -428,6 +483,13 @@ export default function App() {
                     <span>Progreso</span>
                     <strong>{progress.toFixed(1)}%</strong>
                   </div>
+
+                  {savingMoney && (
+                    <div>
+                      <span>Estado</span>
+                      <strong>Guardando...</strong>
+                    </div>
+                  )}
                 </div>
               </div>
 
